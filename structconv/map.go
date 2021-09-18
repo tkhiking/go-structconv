@@ -17,11 +17,11 @@ const (
 
 // DecodeMap decodes a map into a struct.
 func DecodeMap(m map[string]interface{}, v interface{}) error {
-	info, err := getStructInfo(v, parseMapTag)
+	s, err := checkStructPtr(v)
 	if err != nil {
 		return err
 	}
-	if _, decErrs := mapToStruct(m, "map", info); decErrs != nil {
+	if decErrs := mapToStruct("map", m, s); len(decErrs) > 0 {
 		return &DecodeError{
 			Detail: decErrs,
 		}
@@ -29,86 +29,93 @@ func DecodeMap(m map[string]interface{}, v interface{}) error {
 	return nil
 }
 
-func parseMapTag(f reflect.StructField) (interface{}, error) {
-	return parseDecodeTag(f, mapTagName)
-}
-
-func mapToStruct(m interface{}, name string, info *structInfo) (reflect.Value, []*DecodeFieldError) {
+func mapToStruct(name string, m interface{}, s reflect.Value) []*DecodeFieldError {
 	rv := reflect.ValueOf(m)
-	keys := map[string]reflect.Value{}
-	for _, mk := range rv.MapKeys() {
-		keys[mk.String()] = mk
-	}
-	var errs []*DecodeFieldError
+	var decErrs []*DecodeFieldError
 
-	for fk, f := range info.Fields {
-		tag := f.Tag.(decodeTagInfo)
+	walkStructFields(s, func(f fieldInfo) {
+		fm := f.Meta
+		fk := fm.Name
+
+		tag, err := parseDecodeTag(fm, mapTagName)
+		if err != nil {
+			decErr := &DecodeFieldError{
+				Name: name + "[" + fk + "]",
+				Messages: []string{
+					err.Error(),
+				},
+			}
+			decErrs = append(decErrs, decErr)
+			return
+		}
 		if tag.Omitted {
-			continue
+			return
 		}
 
 		var mapKeyStr string
-		if tag.Ok && tag.Key != "" {
+		if tag.OK && tag.Key != "" {
 			mapKeyStr = tag.Key
 		} else {
-			mapKeyStr = f.Meta.Name
+			mapKeyStr = fk
 		}
 		newName := name + "[" + mapKeyStr + "]"
 
-		mk, ok := keys[mapKeyStr]
-		if !ok {
+		mv := rv.MapIndex(reflect.ValueOf(mapKeyStr))
+		if !mv.IsValid() {
 			if tag.Required {
-				err := &DecodeFieldError{
+				decErr := &DecodeFieldError{
 					Name:     newName,
 					Messages: []string{fmt.Sprintf(msgDetailRequired, fk)},
 				}
-				errs = append(errs, err)
+				decErrs = append(decErrs, decErr)
 			}
-			continue
+			return
 		}
 
-		mv := rv.MapIndex(mk)
-		if isNil(mv) {
-			continue
-		}
+		doMapToStruct(newName, mv, f, tag)
+	})
 
-		if mv.Type().Kind() == reflect.Interface {
-			mv = mv.Elem()
-		}
-		fv := f.Value
+	return decErrs
+}
 
-		switch mv.Type().Kind() {
-		case reflect.Map:
-			if f.Child != nil {
-				_, err := mapToStruct(mv.Interface(), newName, f.Child)
-				if len(err) > 0 {
-					errs = append(errs, err...)
-					continue
-				}
-				break
-			}
-			setReflectValue(fv, mv)
-		case reflect.Array, reflect.Slice:
-			if len(f.Collections) > 0 {
-				if err := checkCollections(mv, newName, f, 0); err != nil {
-					errs = append(errs, err...)
-					continue
-				}
-				cv, err := makeCollections(mv, newName, f, 0)
-				if len(err) > 0 {
-					errs = append(errs, err...)
-					continue
-				}
-				fv.Set(cv)
-				break
-			}
-			setReflectValue(fv, mv)
-		default:
-			setReflectValue(fv, mv)
-		}
+func doMapToStruct(name string, mv reflect.Value, fi fieldInfo, tag decodeTagInfo) []*DecodeFieldError {
+	if isNil(mv) {
+		return nil
 	}
 
-	return info.Value, errs
+	if mv.Type().Kind() == reflect.Interface {
+		mv = mv.Elem()
+	}
+	if tag.Conv {
+		mv = mv.Convert(fi.Meta.Type)
+	}
+
+	switch mv.Type().Kind() {
+	case reflect.Map:
+		if !fi.ChildOK {
+			setReflectValue(fi.Value, mv)
+			break
+		}
+		if e := mapToStruct(name, mv.Interface(), fi.Child); len(e) > 0 {
+			return e
+		}
+	case reflect.Array, reflect.Slice:
+		if len(fi.Collections) == 0 {
+			setReflectValue(fi.Value, mv)
+			break
+		}
+		if e := checkCollections(name, mv, fi.Collections); e != nil {
+			return e
+		}
+		cv, e := makeCollections(name, mv, fi.Collections)
+		if len(e) > 0 {
+			return e
+		}
+		fi.Value.Set(cv)
+	default:
+		setReflectValue(fi.Value, mv)
+	}
+	return nil
 }
 
 func setReflectValue(dst, src reflect.Value) {
@@ -119,140 +126,160 @@ func setReflectValue(dst, src reflect.Value) {
 	}
 }
 
-func checkCollections(in reflect.Value, name string, info *fieldInfo, depth int) []*DecodeFieldError {
-	out := info.Collections[depth]
-	var errs []*DecodeFieldError
+func checkCollections(name string, in reflect.Value, out []reflect.Type) []*DecodeFieldError {
+	if len(out) == 0 {
+		return nil
+	}
+	var decErrs []*DecodeFieldError
 
-	if in.Kind() != out.Kind() {
-		err := &DecodeFieldError{
+	if in.Kind() != out[0].Kind() {
+		msg := fmt.Sprintf(msgDetailInvalidType, in.Type(), out[0])
+		decErr := &DecodeFieldError{
 			Name:     name,
-			Messages: []string{fmt.Sprintf(msgDetailInvalidType, in.Type(), out)},
+			Messages: []string{msg},
 		}
-		return append(errs, err)
+		return append(decErrs, decErr)
 	}
-	if in.Kind() == reflect.Array && in.Type().Len() != out.Len() {
-		err := &DecodeFieldError{
+	if in.Kind() == reflect.Array && in.Type().Len() != out[0].Len() {
+		msg := fmt.Sprintf(msgDetailInvalidType, in.Type(), out[0])
+		decErr := &DecodeFieldError{
 			Name:     name,
-			Messages: []string{fmt.Sprintf(msgDetailInvalidType, in.Type(), out)},
+			Messages: []string{msg},
 		}
-		return append(errs, err)
+		return append(decErrs, decErr)
 	}
-	if depth >= len(info.Collections)-1 {
-		return errs
+	if len(out) == 1 {
+		return nil
 	}
 
 	for i := 0; i < in.Len(); i++ {
-		newName := fmt.Sprintf("%s[%d]", name, i)
-		if err := checkCollections(in.Index(i), newName, info, depth+1); err != nil {
-			errs = append(errs, err...)
+		newName := name + "[" + fmt.Sprint(i) + "]"
+		if e := checkCollections(newName, in.Index(i), out[1:]); len(e) > 0 {
+			decErrs = append(decErrs, e...)
 		}
 	}
-	return errs
+	return decErrs
 }
 
-func makeCollections(in reflect.Value, name string, info *fieldInfo, depth int) (reflect.Value, []*DecodeFieldError) {
+func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect.Value, []*DecodeFieldError) {
+	if len(out) == 0 {
+		var v reflect.Value
+		return v, []*DecodeFieldError{{
+			Name:     name,
+			Messages: []string{"internal error: out is empty"},
+		}}
+	}
 	if isNil(in) {
-		return reflect.Zero(info.Collections[depth]), nil
+		return reflect.Zero(out[0]), nil
 	}
 
 	var result reflect.Value
-	var errs []*DecodeFieldError
+	var decErrs []*DecodeFieldError
 	switch in.Type().Kind() {
 	case reflect.Array:
-		result = reflect.New(info.Collections[depth]).Elem()
-		for i := 0; i < in.Len(); i++ {
-			newName := fmt.Sprintf("%s[%d]", name, i)
-			if depth < len(info.Collections)-1 {
-				v, err := makeCollections(in.Index(i), newName, info, depth+1)
-				if len(err) > 0 {
-					errs = append(errs, err...)
+		if len(out) > 1 {
+			result = reflect.New(out[0]).Elem()
+			for i := 0; i < in.Len(); i++ {
+				newName := name + "[" + fmt.Sprint(i) + "]"
+				v, e := makeCollections(newName, in.Index(i), out[1:])
+				if len(e) > 0 {
+					decErrs = append(decErrs, e...)
 					continue
 				}
 				result.Index(i).Set(v)
-			} else {
-				t := info.Collections[depth].Elem()
-				if isNil(in.Index(i)) {
-					v := reflect.Zero(t)
-					result.Index(i).Set(v)
-					continue
-				}
-				ptr := false
-				if t.Kind() == reflect.Ptr {
-					t = t.Elem()
-					ptr = true
-				}
-				s := reflect.New(t)
-				inf, err := getStructInfo(s.Interface(), parseMapTag)
-				if err != nil {
-					decErr := &DecodeFieldError{
-						Name: newName,
-						Messages: []string{
-							err.Error(),
-						},
-					}
-					errs = append(errs, decErr)
-					continue
-				}
-				v, decErrs := mapToStruct(in.Index(i).Interface(), newName, inf)
-				if len(decErrs) > 0 {
-					errs = append(errs, decErrs...)
-					continue
-				}
-				if ptr {
-					v = v.Addr()
-				}
-				result.Index(i).Set(v)
+			}
+		} else {
+			var e []*DecodeFieldError
+			result, e = makeArrayStruct(name, in, out[0])
+			if len(e) > 0 {
+				decErrs = append(decErrs, e...)
 			}
 		}
 	case reflect.Slice:
-		result = reflect.MakeSlice(info.Collections[depth], 0, in.Len())
-		for i := 0; i < in.Len(); i++ {
-			newName := fmt.Sprintf("%s[%d]", name, i)
-			if depth < len(info.Collections)-1 {
-				v, err := makeCollections(in.Index(i), newName, info, depth+1)
-				if len(err) > 0 {
-					errs = append(errs, err...)
+		if len(out) > 1 {
+			result = reflect.MakeSlice(out[0], 0, in.Len())
+			for i := 0; i < in.Len(); i++ {
+				newName := name + "[" + fmt.Sprint(i) + "]"
+				v, e := makeCollections(newName, in.Index(i), out[1:])
+				if len(e) > 0 {
+					decErrs = append(decErrs, e...)
 					continue
-				}
-				result = reflect.Append(result, v)
-			} else {
-				t := info.Collections[depth].Elem()
-				if isNil(in.Index(i)) {
-					v := reflect.Zero(t)
-					result = reflect.Append(result, v)
-					continue
-				}
-				ptr := false
-				if t.Kind() == reflect.Ptr {
-					t = t.Elem()
-					ptr = true
-				}
-				s := reflect.New(t)
-				inf, err := getStructInfo(s.Interface(), parseMapTag)
-				if err != nil {
-					decErr := &DecodeFieldError{
-						Name: newName,
-						Messages: []string{
-							err.Error(),
-						},
-					}
-					errs = append(errs, decErr)
-					continue
-				}
-				v, decErrs := mapToStruct(in.Index(i).Interface(), newName, inf)
-				if len(decErrs) > 0 {
-					errs = append(errs, decErrs...)
-					continue
-				}
-				if ptr {
-					v = v.Addr()
 				}
 				result = reflect.Append(result, v)
 			}
+		} else {
+			var e []*DecodeFieldError
+			result, e = makeSliceStruct(name, in, out[0])
+			if len(e) > 0 {
+				decErrs = append(decErrs, e...)
+			}
 		}
 	}
+	return result, decErrs
+}
 
-	return result, errs
+func makeArrayStruct(name string, in reflect.Value, out reflect.Type) (reflect.Value, []*DecodeFieldError) {
+	result := reflect.New(out).Elem()
+	var decErrs []*DecodeFieldError
+	for i := 0; i < in.Len(); i++ {
+		newName := name + "[" + fmt.Sprint(i) + "]"
+		t := out.Elem()
+		if isNil(in.Index(i)) {
+			v := reflect.Zero(t)
+			result.Index(i).Set(v)
+			continue
+		}
+		ptr := false
+		if t.Kind() == reflect.Ptr {
+			t = t.Elem()
+			ptr = true
+		}
+		pv := reflect.New(t)
+		sv := pv.Elem()
+		e := mapToStruct(newName, in.Index(i).Interface(), sv)
+		if len(e) > 0 {
+			decErrs = append(decErrs, e...)
+			continue
+		}
+		v := sv
+		if ptr {
+			v = v.Addr()
+		}
+		result.Index(i).Set(v)
+	}
+	return result, decErrs
+}
+
+func makeSliceStruct(name string, in reflect.Value, out reflect.Type) (reflect.Value, []*DecodeFieldError) {
+	result := reflect.MakeSlice(out, 0, in.Len())
+	var decErrs []*DecodeFieldError
+	for i := 0; i < in.Len(); i++ {
+		newName := name + "[" + fmt.Sprint(i) + "]"
+		t := out.Elem()
+		if isNil(in.Index(i)) {
+			v := reflect.Zero(t)
+			result = reflect.Append(result, v)
+			continue
+		}
+		ptr := false
+		if t.Kind() == reflect.Ptr {
+			t = t.Elem()
+			ptr = true
+		}
+		pv := reflect.New(t)
+		sv := pv.Elem()
+		e := mapToStruct(newName, in.Index(i).Interface(), sv)
+		if len(e) > 0 {
+			decErrs = append(decErrs, e...)
+			continue
+		}
+		v := sv
+		if ptr {
+			v = v.Addr()
+		}
+		result = reflect.Append(result, v)
+	}
+	return result, decErrs
 }
 
 func isNil(v reflect.Value) bool {

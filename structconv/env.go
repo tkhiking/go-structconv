@@ -24,26 +24,32 @@ func (d *envData) Get(key string) (string, bool) {
 
 // DecodeEnv decodes environment variables into a struct.
 func DecodeEnv(v interface{}) error {
-	if err := initStruct(v); err != nil {
-		return err
-	}
-	parser := func(f reflect.StructField) (interface{}, error) {
-		return parseDecodeTag(f, envTagName)
-	}
-	info, err := getStructInfo(v, parser)
+	s, err := checkStructPtr(v)
 	if err != nil {
 		return err
 	}
+	if err := initStruct(v); err != nil {
+		return err
+	}
+	parser := func(f reflect.StructField) (decodeTagInfo, error) {
+		return parseDecodeTag(f, envTagName)
+	}
 	var strMap stringMap = &envData{}
-	if err := stringMapToStruct(info, strMap, getEnvKey); err != nil {
+	params := stringMapToStructParams{
+		Struct:    s,
+		StringMap: strMap,
+		TagParser: parser,
+		KeyParser: getEnvKey,
+	}
+	if err := stringMapToStruct(params); err != nil {
 		return err
 	}
 	return nil
 }
 
-func getEnvKey(info *fieldInfo, tag decodeTagInfo) string {
+func getEnvKey(info fieldInfo, tag decodeTagInfo) string {
 	var key string
-	if tag.Ok && tag.Key != "" {
+	if tag.OK && tag.Key != "" {
 		key = tag.Key
 	} else {
 		key = strcase.ToUpperSnake(info.Meta.Name)

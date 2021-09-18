@@ -15,6 +15,15 @@ const (
 	msgDetailInvalidFieldType = "%v most be %v"
 )
 
+type decodeTagParser func(reflect.StructField) (decodeTagInfo, error)
+
+type stringMapToStructParams struct {
+	Struct    reflect.Value
+	StringMap stringMap
+	TagParser decodeTagParser
+	KeyParser stringMapKeyFn
+}
+
 type stringMap interface {
 	Get(string) (string, bool)
 }
@@ -28,30 +37,36 @@ func (d *stringMapData) Get(key string) (string, bool) {
 	return v, ok
 }
 
-type getStringMapKeyFn func(*fieldInfo, decodeTagInfo) string
+type stringMapKeyFn func(fieldInfo, decodeTagInfo) string
 
 // DecodeStringMap decodes a string map into a struct.
 func DecodeStringMap(m map[string]string, v interface{}) error {
-	if err := initStruct(v); err != nil {
-		return err
-	}
-	parser := func(f reflect.StructField) (interface{}, error) {
-		return parseDecodeTag(f, stringMapTagName)
-	}
-	info, err := getStructInfo(v, parser)
+	s, err := checkStructPtr(v)
 	if err != nil {
 		return err
 	}
+	if err := initStruct(v); err != nil {
+		return err
+	}
+	parser := func(f reflect.StructField) (decodeTagInfo, error) {
+		return parseDecodeTag(f, stringMapTagName)
+	}
 	var strMap stringMap = &stringMapData{m}
-	if err := stringMapToStruct(info, strMap, getStringMapKey); err != nil {
+	params := stringMapToStructParams{
+		Struct:    s,
+		StringMap: strMap,
+		TagParser: parser,
+		KeyParser: getStringMapKey,
+	}
+	if err := stringMapToStruct(params); err != nil {
 		return err
 	}
 	return nil
 }
 
-func getStringMapKey(info *fieldInfo, tag decodeTagInfo) string {
+func getStringMapKey(info fieldInfo, tag decodeTagInfo) string {
 	var key string
-	if tag.Ok && tag.Key != "" {
+	if tag.OK && tag.Key != "" {
 		key = tag.Key
 	} else {
 		key = info.Meta.Name
@@ -59,8 +74,8 @@ func getStringMapKey(info *fieldInfo, tag decodeTagInfo) string {
 	return key
 }
 
-func stringMapToStruct(info *structInfo, m stringMap, fn getStringMapKeyFn) *DecodeError {
-	if errs := doStringMapToStruct(info, m, fn); len(errs) > 0 {
+func stringMapToStruct(params stringMapToStructParams) *DecodeError {
+	if errs := doStringMapToStruct(params); len(errs) > 0 {
 		err := &DecodeError{
 			Detail: errs,
 		}
@@ -69,27 +84,43 @@ func stringMapToStruct(info *structInfo, m stringMap, fn getStringMapKeyFn) *Dec
 	return nil
 }
 
-func doStringMapToStruct(info *structInfo, m stringMap, fn getStringMapKeyFn) []*DecodeFieldError {
+func doStringMapToStruct(params stringMapToStructParams) []*DecodeFieldError {
 	var errs []*DecodeFieldError
-	for _, inf := range info.Fields {
+	walkStructFields(params.Struct, func(inf fieldInfo) {
 		if len(inf.Collections) > 0 {
-			continue
+			return
 		}
-		if inf.Child != nil {
-			childErrs := doStringMapToStruct(inf.Child, m, fn)
+		if inf.ChildOK {
+			p := stringMapToStructParams{
+				Struct:    inf.Child,
+				StringMap: params.StringMap,
+				TagParser: params.TagParser,
+				KeyParser: params.KeyParser,
+			}
+			childErrs := doStringMapToStruct(p)
 			if len(childErrs) > 0 {
 				errs = append(errs, childErrs...)
 			}
-			continue
+			return
 		}
-		tag := inf.Tag.(decodeTagInfo)
+		tag, err := params.TagParser(inf.Meta)
+		if err != nil {
+			decErr := &DecodeFieldError{
+				Name: inf.Meta.Name,
+				Messages: []string{
+					err.Error(),
+				},
+			}
+			errs = append(errs, decErr)
+			return
+		}
 		if tag.Omitted {
-			continue
+			return
 		}
 
-		key := fn(inf, tag)
-		if val, ok := m.Get(key); ok {
-			if err := setStringToField(inf, val); err != nil {
+		key := params.KeyParser(inf, tag)
+		if val, ok := params.StringMap.Get(key); ok {
+			if err := convertStringToField(inf.Value, val); err != nil {
 				typ := inf.Value.Type().String()
 				msg := fmt.Sprintf(msgDetailInvalidFieldType, key, typ)
 				err := &DecodeFieldError{
@@ -107,41 +138,38 @@ func doStringMapToStruct(info *structInfo, m stringMap, fn getStringMapKeyFn) []
 			}
 			errs = append(errs, err)
 		}
-	}
+	})
 	return errs
 }
 
-func setStringToField(info *fieldInfo, s string) error {
-	fv := info.Value
-
-	switch fv.Type().Kind() {
+func convertStringToField(rv reflect.Value, s string) error {
+	switch rv.Type().Kind() {
 	case reflect.String:
-		fv.SetString(s)
+		rv.SetString(s)
 	case reflect.Bool:
 		v, err := strconv.ParseBool(s)
 		if err != nil {
 			return err
 		}
-		fv.SetBool(v)
+		rv.SetBool(v)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		v, err := strconv.ParseInt(s, 0, fv.Type().Bits())
+		v, err := strconv.ParseInt(s, 0, rv.Type().Bits())
 		if err != nil {
 			return err
 		}
-		fv.SetInt(v)
+		rv.SetInt(v)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		v, err := strconv.ParseUint(s, 0, fv.Type().Bits())
+		v, err := strconv.ParseUint(s, 0, rv.Type().Bits())
 		if err != nil {
 			return err
 		}
-		fv.SetUint(v)
+		rv.SetUint(v)
 	case reflect.Float32, reflect.Float64:
-		v, err := strconv.ParseFloat(s, fv.Type().Bits())
+		v, err := strconv.ParseFloat(s, rv.Type().Bits())
 		if err != nil {
 			return err
 		}
-		fv.SetFloat(v)
+		rv.SetFloat(v)
 	}
-
 	return nil
 }
