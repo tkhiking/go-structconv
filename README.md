@@ -50,7 +50,7 @@ func main() {
                 "E": "BAR",
             },
         },
-    }, &e)
+    }, &e, nil)
     fmt.Println(e) // {1 [{2 foo } {3 bar }]}
 }
 ```
@@ -88,7 +88,7 @@ func main() {
     }
     var conf config
     conf.AppPort = 80 // Default value.
-    err := structconv.DecodeStringMap(m, &conf)
+    err := structconv.DecodeStringMap(m, &conf, nil)
     if err != nil {
         fmt.Println(err)
     }
@@ -130,7 +130,7 @@ type db struct {
 func main() {
     var conf config
     conf.AppPort = 80 // Default value.
-    err := structconv.DecodeEnv(&conf)
+    err := structconv.DecodeEnv(&conf, nil)
     if err != nil {
         fmt.Println(err)
     }

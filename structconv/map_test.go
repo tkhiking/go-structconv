@@ -30,21 +30,25 @@ func TestDecodeMap(t *testing.T) {
 	}
 	type testMapKind struct {
 		Bool    bool
+		BoolPtr *bool
 		Int     int
 		Float64 float64
 		Array   [1][2]int
 		// Func      func(int) int
-		Interface interface{}
-		Map       map[int]map[int]int
-		Ptr       *int
-		Slice     [][]int
-		String    string
-		Struct    [][]*testMap1
-		Error     error
-		Default   string
-		Rename    string `map:"alt_name"`
-		Required  string `map:",required"`
-		Omitted   string `map:"-"`
+		Interface    interface{}
+		InterfacePtr *interface{}
+		Map          map[int]map[int]int
+		MapPtr       *map[int]map[int]int
+		Ptr          *int
+		Slice        [][]int
+		SlicePtr     *[][]int
+		String       string
+		Struct       [][]*testMap1
+		Error        error
+		Default      string
+		Rename       string `map:"alt_name"`
+		Required     string `map:",required"`
+		Omitted      string `map:"-"`
 	}
 
 	type testMapI struct {
@@ -88,6 +92,10 @@ func TestDecodeMap(t *testing.T) {
 	}
 
 	testInt := 1
+	testBool := true
+	testInterface := interface{}(testInt)
+	testMap := map[int]map[int]int{4: {5: 6}}
+	testSlicePtr := [][]int{{7}}
 	var testInterfaceZero testMapInterface
 	var testStruct2Nil *nilKind1
 	var testStruct4Zero nilKind1
@@ -101,15 +109,19 @@ func TestDecodeMap(t *testing.T) {
 			name: "variation",
 			in: map[string]interface{}{
 				"Bool":    true,
+				"BoolPtr": true,
 				"Int":     2,
 				"Float64": 0.3,
 				"Array":   [1][2]int{{3, 4}},
 				// "Func":      func(a int) int { return a },
-				"Interface": 5,
-				"Map":       map[int]map[int]int{3: {2: 1}},
-				"Ptr":       &testInt,
-				"Slice":     [][]int{{6}},
-				"String":    "s",
+				"Interface":    5,
+				"InterfacePtr": 1,
+				"Map":          map[int]map[int]int{3: {2: 1}},
+				"MapPtr":       &testMap,
+				"Ptr":          &testInt,
+				"Slice":        [][]int{{6}},
+				"SlicePtr":     &testSlicePtr,
+				"String":       "s",
 				"Struct": [][]map[string]interface{}{{{
 					"A": 7,
 					"B": map[string]interface{}{
@@ -126,15 +138,19 @@ func TestDecodeMap(t *testing.T) {
 			},
 			want: testMapKind{
 				Bool:    true,
+				BoolPtr: &testBool,
 				Int:     2,
 				Float64: 0.3,
 				Array:   [1][2]int{{3, 4}},
 				// Func:      func(a int) int { return a },
-				Interface: 5,
-				Map:       map[int]map[int]int{3: {2: 1}},
-				Ptr:       &testInt,
-				Slice:     [][]int{{6}},
-				String:    "s",
+				Interface:    5,
+				InterfacePtr: &testInterface,
+				Map:          map[int]map[int]int{3: {2: 1}},
+				MapPtr:       &testMap,
+				Ptr:          &testInt,
+				Slice:        [][]int{{6}},
+				SlicePtr:     &testSlicePtr,
+				String:       "s",
 				Struct: [][]*testMap1{{{
 					A: 7,
 					B: testMap2{
@@ -239,7 +255,7 @@ func TestDecodeMap(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := DecodeMap(tt.in, tt.got)
+			err := DecodeMap(tt.in, tt.got, nil)
 			if err != nil {
 				t.Error(err)
 			}

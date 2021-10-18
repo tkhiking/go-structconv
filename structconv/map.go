@@ -15,13 +15,19 @@ const (
 	mapTagName           = "map"
 )
 
+type DecodeMapOptions struct {
+	TagName string
+	TagOnly bool
+}
+
 // DecodeMap decodes a map into a struct.
-func DecodeMap(m map[string]interface{}, v interface{}) error {
+func DecodeMap(m map[string]interface{}, v interface{}, o *DecodeMapOptions) error {
+	o = initDecodeMapOptions(o)
 	s, err := checkStructPtr(v)
 	if err != nil {
 		return err
 	}
-	if decErrs := mapToStruct("map", m, s); len(decErrs) > 0 {
+	if decErrs := mapToStruct("map", m, s, *o); len(decErrs) > 0 {
 		return &DecodeError{
 			Detail: decErrs,
 		}
@@ -29,7 +35,20 @@ func DecodeMap(m map[string]interface{}, v interface{}) error {
 	return nil
 }
 
-func mapToStruct(name string, m interface{}, s reflect.Value) []*DecodeFieldError {
+func initDecodeMapOptions(o *DecodeMapOptions) *DecodeMapOptions {
+	if o == nil {
+		o = &DecodeMapOptions{
+			TagName: mapTagName,
+			TagOnly: false,
+		}
+	}
+	if o.TagName == "" {
+		o.TagName = mapTagName
+	}
+	return o
+}
+
+func mapToStruct(name string, m interface{}, s reflect.Value, o DecodeMapOptions) []*DecodeFieldError {
 	rv := reflect.ValueOf(m)
 	var decErrs []*DecodeFieldError
 
@@ -37,7 +56,7 @@ func mapToStruct(name string, m interface{}, s reflect.Value) []*DecodeFieldErro
 		fm := f.Meta
 		fk := fm.Name
 
-		tag, err := parseDecodeTag(fm, mapTagName)
+		tag, err := parseDecodeTag(fm, o.TagName)
 		if err != nil {
 			decErr := &DecodeFieldError{
 				Name: name + "[" + fk + "]",
@@ -46,6 +65,9 @@ func mapToStruct(name string, m interface{}, s reflect.Value) []*DecodeFieldErro
 				},
 			}
 			decErrs = append(decErrs, decErr)
+			return
+		}
+		if o.TagOnly && !f.ChildOK && !tag.OK {
 			return
 		}
 		if tag.Omitted {
@@ -72,17 +94,16 @@ func mapToStruct(name string, m interface{}, s reflect.Value) []*DecodeFieldErro
 			return
 		}
 
-		doMapToStruct(newName, mv, f, tag)
+		doMapToStruct(newName, mv, f, tag, o)
 	})
 
 	return decErrs
 }
 
-func doMapToStruct(name string, mv reflect.Value, fi fieldInfo, tag decodeTagInfo) []*DecodeFieldError {
+func doMapToStruct(name string, mv reflect.Value, fi fieldInfo, tag decodeTagInfo, o DecodeMapOptions) []*DecodeFieldError {
 	if isNil(mv) {
 		return nil
 	}
-
 	if mv.Type().Kind() == reflect.Interface {
 		mv = mv.Elem()
 	}
@@ -96,7 +117,7 @@ func doMapToStruct(name string, mv reflect.Value, fi fieldInfo, tag decodeTagInf
 			setReflectValue(fi.Value, mv)
 			break
 		}
-		if e := mapToStruct(name, mv.Interface(), fi.Child); len(e) > 0 {
+		if e := mapToStruct(name, mv.Interface(), fi.Child, o); len(e) > 0 {
 			return e
 		}
 	case reflect.Array, reflect.Slice:
@@ -107,7 +128,7 @@ func doMapToStruct(name string, mv reflect.Value, fi fieldInfo, tag decodeTagInf
 		if e := checkCollections(name, mv, fi.Collections); e != nil {
 			return e
 		}
-		cv, e := makeCollections(name, mv, fi.Collections)
+		cv, e := makeCollections(name, mv, fi.Collections, o)
 		if len(e) > 0 {
 			return e
 		}
@@ -123,6 +144,17 @@ func setReflectValue(dst, src reflect.Value) {
 		dst.Type().Kind() == reflect.Interface &&
 			src.Type().Implements(dst.Type()) {
 		dst.Set(src)
+	}
+	if dst.Type().Kind() == reflect.Ptr && src.Type().Kind() != reflect.Ptr {
+		dstET := dst.Type().Elem()
+		eqType := src.Type() == dstET
+		impl := dstET.Kind() == reflect.Interface && src.Type().Implements(dstET)
+		if (eqType || impl) && !isNil(src) {
+			rv := reflect.New(dstET)
+			rv.Elem().Set(src)
+			dst.Set(rv)
+			// dst.Set(src.Addr())
+		}
 	}
 }
 
@@ -161,7 +193,7 @@ func checkCollections(name string, in reflect.Value, out []reflect.Type) []*Deco
 	return decErrs
 }
 
-func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect.Value, []*DecodeFieldError) {
+func makeCollections(name string, in reflect.Value, out []reflect.Type, o DecodeMapOptions) (reflect.Value, []*DecodeFieldError) {
 	if len(out) == 0 {
 		var v reflect.Value
 		return v, []*DecodeFieldError{{
@@ -181,7 +213,7 @@ func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect
 			result = reflect.New(out[0]).Elem()
 			for i := 0; i < in.Len(); i++ {
 				newName := name + "[" + fmt.Sprint(i) + "]"
-				v, e := makeCollections(newName, in.Index(i), out[1:])
+				v, e := makeCollections(newName, in.Index(i), out[1:], o)
 				if len(e) > 0 {
 					decErrs = append(decErrs, e...)
 					continue
@@ -190,7 +222,7 @@ func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect
 			}
 		} else {
 			var e []*DecodeFieldError
-			result, e = makeArrayStruct(name, in, out[0])
+			result, e = makeArrayStruct(name, in, out[0], o)
 			if len(e) > 0 {
 				decErrs = append(decErrs, e...)
 			}
@@ -200,7 +232,7 @@ func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect
 			result = reflect.MakeSlice(out[0], 0, in.Len())
 			for i := 0; i < in.Len(); i++ {
 				newName := name + "[" + fmt.Sprint(i) + "]"
-				v, e := makeCollections(newName, in.Index(i), out[1:])
+				v, e := makeCollections(newName, in.Index(i), out[1:], o)
 				if len(e) > 0 {
 					decErrs = append(decErrs, e...)
 					continue
@@ -209,7 +241,7 @@ func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect
 			}
 		} else {
 			var e []*DecodeFieldError
-			result, e = makeSliceStruct(name, in, out[0])
+			result, e = makeSliceStruct(name, in, out[0], o)
 			if len(e) > 0 {
 				decErrs = append(decErrs, e...)
 			}
@@ -218,7 +250,7 @@ func makeCollections(name string, in reflect.Value, out []reflect.Type) (reflect
 	return result, decErrs
 }
 
-func makeArrayStruct(name string, in reflect.Value, out reflect.Type) (reflect.Value, []*DecodeFieldError) {
+func makeArrayStruct(name string, in reflect.Value, out reflect.Type, o DecodeMapOptions) (reflect.Value, []*DecodeFieldError) {
 	result := reflect.New(out).Elem()
 	var decErrs []*DecodeFieldError
 	for i := 0; i < in.Len(); i++ {
@@ -236,7 +268,7 @@ func makeArrayStruct(name string, in reflect.Value, out reflect.Type) (reflect.V
 		}
 		pv := reflect.New(t)
 		sv := pv.Elem()
-		e := mapToStruct(newName, in.Index(i).Interface(), sv)
+		e := mapToStruct(newName, in.Index(i).Interface(), sv, o)
 		if len(e) > 0 {
 			decErrs = append(decErrs, e...)
 			continue
@@ -250,7 +282,7 @@ func makeArrayStruct(name string, in reflect.Value, out reflect.Type) (reflect.V
 	return result, decErrs
 }
 
-func makeSliceStruct(name string, in reflect.Value, out reflect.Type) (reflect.Value, []*DecodeFieldError) {
+func makeSliceStruct(name string, in reflect.Value, out reflect.Type, o DecodeMapOptions) (reflect.Value, []*DecodeFieldError) {
 	result := reflect.MakeSlice(out, 0, in.Len())
 	var decErrs []*DecodeFieldError
 	for i := 0; i < in.Len(); i++ {
@@ -268,7 +300,7 @@ func makeSliceStruct(name string, in reflect.Value, out reflect.Type) (reflect.V
 		}
 		pv := reflect.New(t)
 		sv := pv.Elem()
-		e := mapToStruct(newName, in.Index(i).Interface(), sv)
+		e := mapToStruct(newName, in.Index(i).Interface(), sv, o)
 		if len(e) > 0 {
 			decErrs = append(decErrs, e...)
 			continue

@@ -15,32 +15,23 @@ const (
 	msgDetailInvalidFieldType = "%v most be %v"
 )
 
-type decodeTagParser func(reflect.StructField) (decodeTagInfo, error)
+type DecodeStringMapOptions struct {
+	TagName      string
+	TagOnly      bool
+	KeyConverter func(string) string
+}
 
 type stringMapToStructParams struct {
 	Struct    reflect.Value
-	StringMap stringMap
-	TagParser decodeTagParser
-	KeyParser stringMapKeyFn
+	StringMap map[string]string
+	Options   DecodeStringMapOptions
 }
 
-type stringMap interface {
-	Get(string) (string, bool)
-}
-
-type stringMapData struct {
-	Data map[string]string
-}
-
-func (d *stringMapData) Get(key string) (string, bool) {
-	v, ok := d.Data[key]
-	return v, ok
-}
-
-type stringMapKeyFn func(fieldInfo, decodeTagInfo) string
+func nilKeyConverter(s string) string { return s }
 
 // DecodeStringMap decodes a string map into a struct.
-func DecodeStringMap(m map[string]string, v interface{}) error {
+func DecodeStringMap(m map[string]string, v interface{}, o *DecodeStringMapOptions) error {
+	opts := initDecodeStringMapOptions(o)
 	s, err := checkStructPtr(v)
 	if err != nil {
 		return err
@@ -48,15 +39,10 @@ func DecodeStringMap(m map[string]string, v interface{}) error {
 	if err := initStruct(v); err != nil {
 		return err
 	}
-	parser := func(f reflect.StructField) (decodeTagInfo, error) {
-		return parseDecodeTag(f, stringMapTagName)
-	}
-	var strMap stringMap = &stringMapData{m}
 	params := stringMapToStructParams{
 		Struct:    s,
-		StringMap: strMap,
-		TagParser: parser,
-		KeyParser: getStringMapKey,
+		StringMap: m,
+		Options:   opts,
 	}
 	if err := stringMapToStruct(params); err != nil {
 		return err
@@ -64,14 +50,18 @@ func DecodeStringMap(m map[string]string, v interface{}) error {
 	return nil
 }
 
-func getStringMapKey(info fieldInfo, tag decodeTagInfo) string {
-	var key string
-	if tag.OK && tag.Key != "" {
-		key = tag.Key
-	} else {
-		key = info.Meta.Name
+func initDecodeStringMapOptions(o *DecodeStringMapOptions) DecodeStringMapOptions {
+	var result DecodeStringMapOptions
+	if o != nil {
+		result = *o
 	}
-	return key
+	if result.TagName == "" {
+		result.TagName = stringMapTagName
+	}
+	if result.KeyConverter == nil {
+		result.KeyConverter = nilKeyConverter
+	}
+	return result
 }
 
 func stringMapToStruct(params stringMapToStructParams) *DecodeError {
@@ -94,8 +84,7 @@ func doStringMapToStruct(params stringMapToStructParams) []*DecodeFieldError {
 			p := stringMapToStructParams{
 				Struct:    inf.Child,
 				StringMap: params.StringMap,
-				TagParser: params.TagParser,
-				KeyParser: params.KeyParser,
+				Options:   params.Options,
 			}
 			childErrs := doStringMapToStruct(p)
 			if len(childErrs) > 0 {
@@ -103,7 +92,7 @@ func doStringMapToStruct(params stringMapToStructParams) []*DecodeFieldError {
 			}
 			return
 		}
-		tag, err := params.TagParser(inf.Meta)
+		tag, err := parseDecodeTag(inf.Meta, params.Options.TagName)
 		if err != nil {
 			decErr := &DecodeFieldError{
 				Name: inf.Meta.Name,
@@ -117,10 +106,13 @@ func doStringMapToStruct(params stringMapToStructParams) []*DecodeFieldError {
 		if tag.Omitted {
 			return
 		}
+		if params.Options.TagOnly && !tag.OK {
+			return
+		}
 
-		key := params.KeyParser(inf, tag)
-		if val, ok := params.StringMap.Get(key); ok {
-			if err := convertStringToField(inf.Value, val); err != nil {
+		key := getStringMapKey(inf, tag, params.Options.KeyConverter)
+		if val, ok := params.StringMap[key]; ok {
+			if err := convertStringToField(inf.Meta, inf.Value, val); err != nil {
 				typ := inf.Value.Type().String()
 				msg := fmt.Sprintf(msgDetailInvalidFieldType, key, typ)
 				err := &DecodeFieldError{
@@ -142,7 +134,41 @@ func doStringMapToStruct(params stringMapToStructParams) []*DecodeFieldError {
 	return errs
 }
 
-func convertStringToField(rv reflect.Value, s string) error {
+func getStringMapKey(info fieldInfo, tag decodeTagInfo, fn func(string) string) string {
+	var key string
+	if tag.OK && tag.Key != "" {
+		key = tag.Key
+	} else {
+		key = fn(info.Meta.Name)
+	}
+	return key
+}
+
+func convertStringToField(rf reflect.StructField, rv reflect.Value, in string) error {
+	crt := rf.Type
+	crv := rv
+	var rootPtr *reflect.Value
+	for isRoot := true; crt.Kind() == reflect.Ptr; {
+		ptr := reflect.New(crt.Elem())
+		if isRoot {
+			rootPtr = &ptr
+			isRoot = false
+		} else {
+			crv.Set(ptr)
+		}
+		crt = crt.Elem()
+		crv = ptr.Elem()
+	}
+	if err := doConvertStringToField(crv, in); err != nil {
+		return err
+	}
+	if rootPtr != nil {
+		rv.Set(*rootPtr)
+	}
+	return nil
+}
+
+func doConvertStringToField(rv reflect.Value, s string) error {
 	switch rv.Type().Kind() {
 	case reflect.String:
 		rv.SetString(s)

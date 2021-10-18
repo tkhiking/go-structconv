@@ -69,7 +69,7 @@ func TestDecodeStringMap(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var got testStringMap
-			err := DecodeStringMap(tt.in, &got)
+			err := DecodeStringMap(tt.in, &got, nil)
 			if err != nil {
 				t.Error(err)
 			}

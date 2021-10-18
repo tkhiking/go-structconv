@@ -50,7 +50,7 @@ func TestDecodeEnv(t *testing.T) {
 			}
 			var got envTest
 			got.Default = "d"
-			err := DecodeEnv(&got)
+			err := DecodeEnv(&got, nil)
 			if err != nil {
 				t.Error(err)
 			}

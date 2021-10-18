@@ -6,7 +6,7 @@ package structconv
 
 import (
 	"os"
-	"reflect"
+	"strings"
 
 	"github.com/twihike/go-strcase/strcase"
 )
@@ -15,44 +15,34 @@ const (
 	envTagName = "env"
 )
 
-type envData struct{}
-
-func (d *envData) Get(key string) (string, bool) {
-	v, ok := os.LookupEnv(key)
-	return v, ok
+type DecodeEnvOptions struct {
+	TagName      string
+	TagOnly      bool
+	KeyConverter func(string) string
 }
 
 // DecodeEnv decodes environment variables into a struct.
-func DecodeEnv(v interface{}) error {
-	s, err := checkStructPtr(v)
-	if err != nil {
-		return err
+func DecodeEnv(v interface{}, o *DecodeEnvOptions) error {
+	m := map[string]string{}
+	for _, e := range os.Environ() {
+		pair := strings.SplitN(e, "=", 2)
+		if len(pair) == 2 {
+			m[pair[0]] = pair[1]
+		}
 	}
-	if err := initStruct(v); err != nil {
-		return err
+	if o == nil {
+		o = &DecodeEnvOptions{}
 	}
-	parser := func(f reflect.StructField) (decodeTagInfo, error) {
-		return parseDecodeTag(f, envTagName)
+	if o.TagName == "" {
+		o.TagName = envTagName
 	}
-	var strMap stringMap = &envData{}
-	params := stringMapToStructParams{
-		Struct:    s,
-		StringMap: strMap,
-		TagParser: parser,
-		KeyParser: getEnvKey,
+	if o.KeyConverter == nil {
+		o.KeyConverter = strcase.ToUpperSnake
 	}
-	if err := stringMapToStruct(params); err != nil {
-		return err
+	opts := &DecodeStringMapOptions{
+		TagName:      o.TagName,
+		TagOnly:      o.TagOnly,
+		KeyConverter: o.KeyConverter,
 	}
-	return nil
-}
-
-func getEnvKey(info fieldInfo, tag decodeTagInfo) string {
-	var key string
-	if tag.OK && tag.Key != "" {
-		key = tag.Key
-	} else {
-		key = strcase.ToUpperSnake(info.Meta.Name)
-	}
-	return key
+	return DecodeStringMap(m, v, opts)
 }

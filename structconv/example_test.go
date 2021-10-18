@@ -34,7 +34,7 @@ func ExampleDecodeMap() {
 
 	var conf config
 	conf.Port = 80 // Default value.
-	err := DecodeMap(strMap, &conf)
+	err := DecodeMap(strMap, &conf, nil)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -66,7 +66,7 @@ func ExampleDecodeStringMap() {
 
 	var conf config
 	conf.Port = 80 // Default value.
-	err := DecodeStringMap(strMap, &conf)
+	err := DecodeStringMap(strMap, &conf, nil)
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -103,7 +103,7 @@ func ExampleDecodeEnv() {
 
 	var env config
 	env.Port = 80 // Default value.
-	err := DecodeEnv(&env)
+	err := DecodeEnv(&env, nil)
 	if err != nil {
 		fmt.Println(err)
 	}
